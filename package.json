@@ -1,0 +1,30 @@
+{
+  "name": "@tyler.given/skill-secrets-setup",
+  "version": "0.1.0",
+  "description": "Interactive Copilot skill for setting up secure secret storage on your workstation",
+  "keywords": [
+    "copilot",
+    "github-copilot",
+    "skill",
+    "secrets",
+    "keychain",
+    "keyring",
+    "vault",
+    "git-credential-manager",
+    "security",
+    "onboarding"
+  ],
+  "homepage": "https://github.com/tyler555g/skill-secrets-setup",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tyler555g/skill-secrets-setup.git"
+  },
+  "license": "MIT",
+  "author": "tyler555g",
+  "files": [
+    "SKILL.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
