@@ -179,10 +179,22 @@ function Invoke-VaultStore {
 
 function Invoke-VaultGet {
     param([string]$VaultKey)
-    $result = vault kv get -field=value "secret/secret-ops/$VaultKey" 2>$null
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrEmpty($result)) {
+    # Use Process+ReadToEnd to preserve multiline values faithfully
+    $proc = [System.Diagnostics.Process]::new()
+    $proc.StartInfo.FileName = 'vault'
+    $proc.StartInfo.Arguments = "kv get -field=value `"secret/secret-ops/$VaultKey`""
+    $proc.StartInfo.UseShellExecute = $false
+    $proc.StartInfo.RedirectStandardOutput = $true
+    $proc.StartInfo.RedirectStandardError = $true
+    $proc.Start() | Out-Null
+    $result = $proc.StandardOutput.ReadToEnd()
+    $proc.WaitForExit()
+    if ($proc.ExitCode -ne 0 -or [string]::IsNullOrEmpty($result)) {
         throw "Secret '$VaultKey' not found"
     }
+    # Remove single trailing newline added by vault CLI output
+    if ($result.EndsWith("`n")) { $result = $result.Substring(0, $result.Length - 1) }
+    if ($result.EndsWith("`r")) { $result = $result.Substring(0, $result.Length - 1) }
     return $result
 }
 

@@ -50,6 +50,7 @@ Secure secret operations with an inject model. The agent orchestrates; trusted s
 **Auto-detect priority:** Vault → Keychain → keyctl → GCM. First success pins the backend.
 **Fail-closed:** If Vault is configured (VAULT_ADDR set, token valid) but unusable, detection fails rather than silently downgrading to a local backend.
 **Store limitation:** All interactive stores are single-line only (`read -rsp` / `Read-Host`). For multiline secrets (PEM, JSON), store via the backend's native tool and use secret-ops for inject/exists/delete.
+**Windows inject:** Works with native executables (.exe). For batch shims (.cmd/.bat), use: `inject KEY --confirm -- cmd.exe /c script.cmd args`
 
 ## Protocol
 

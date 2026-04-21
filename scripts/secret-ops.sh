@@ -147,14 +147,14 @@ _ensure_backend() {
 _store_keychain()  { security add-generic-password -a "secret-ops" -s "${SERVICE_PREFIX}$1" -U -w; }
 _store_keyring() {
   local key="$1" store_rc=0
-  read -rsp "Enter secret for $key: " val; echo
+  IFS= read -rsp "Enter secret for $key: " val; echo
   printf '%s' "$val" | keyctl padd user "${SERVICE_PREFIX}${key}" @u >/dev/null || store_rc=$?
   val=""
   return "$store_rc"
 }
 _store_gcm() {
   local key="$1" store_rc=0
-  read -rsp "Enter secret for $key: " val; echo
+  IFS= read -rsp "Enter secret for $key: " val; echo
   printf 'protocol=https\nhost=secret-ops.local\npath=%s\nusername=secret-ops\npassword=%s\n\n' "$key" "$val" \
     | git -c credential.helper=manager -c credential.useHttpPath=true credential approve || store_rc=$?
   val=""
@@ -162,7 +162,7 @@ _store_gcm() {
 }
 _store_vault() {
   local key="$1" store_rc=0
-  read -rsp "Enter secret for $key: " val; echo
+  IFS= read -rsp "Enter secret for $key: " val; echo
   printf '%s' "$val" | vault kv put "secret/secret-ops/$key" value=- >/dev/null || store_rc=$?
   val=""
   return "$store_rc"
