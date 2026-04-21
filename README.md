@@ -1,6 +1,6 @@
 # skill-secrets-setup
 
-Copilot skill for secure secret management using an **inject model** — the agent orchestrates operations but **never sees secret values**.
+Copilot skill for secure secret management using an **inject model** — the agent orchestrates operations but **never sees secret values through script code paths**. The injected subprocess is agent-chosen and may produce output containing the value — use purpose-built commands.
 
 ## Architecture
 
@@ -47,13 +47,16 @@ Backend is **pinned on first use** to `~/.config/secret-ops/backend`. No silent 
 ## Security Model
 
 - **No reveal** — there is no `get`/`read` command. Only `inject` (scoped subprocess via subshell+exec).
+- **Namespaced storage** — all backends use `secret-ops:` prefix / `secret/secret-ops/` path to isolate from unrelated credentials.
+- **Deterministic GCM** — forces `credential.helper=manager` and `credential.useHttpPath=true` on every call.
 - **Approval gates** — `inject` and `delete` require `--confirm` flag. Agent must ask user before passing it.
 - **Fail-closed** — if the pinned backend fails, the operation fails. No fallback chain.
 - **No argv leaks** — secrets injected via shell `export` in a subshell, not `env` command argv.
 - **Locked backend pinning** — first-use detection uses `flock`/mutex to prevent race conditions.
-- **Key validation** — key names restricted to `[A-Za-z0-9_.-]+` (max 256 chars).
+- **Key validation** — key names restricted to `[A-Za-z0-9_.-]+` (max 256 chars). Inject further restricted to env-var-safe.
+- **Hardened permissions** — config directory set to `0700`.
 - **Audit log** — every operation logged to `~/.config/secret-ops/audit.log` (ops only, never values).
-- **AI-Human Principle 3** — agent never asks for, sees, or handles secret values.
+- **AI-Human Principle 3** — agent never asks for, sees, or handles secret values through script code paths.
 
 ## Token Efficiency
 

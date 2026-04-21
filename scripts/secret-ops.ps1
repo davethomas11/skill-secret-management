@@ -61,12 +61,14 @@ function Get-Backend {
         # Re-check after lock
         if (Test-Path $BackendFile) { return (Get-Content $BackendFile).Trim() }
 
-        # Detect: Vault → GCM
+        # Detect: Vault → GCM (use $LASTEXITCODE for native commands)
         if ($env:VAULT_ADDR -and (Get-Command vault -ErrorAction SilentlyContinue)) {
-            try { vault token lookup 2>$null | Out-Null; 'vault' | Out-File $BackendFile -NoNewline -Encoding utf8; return 'vault' } catch {}
+            vault token lookup 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { 'vault' | Out-File $BackendFile -NoNewline -Encoding utf8; return 'vault' }
         }
         if (Get-Command git -ErrorAction SilentlyContinue) {
-            try { git credential-manager --version 2>$null | Out-Null; 'gcm' | Out-File $BackendFile -NoNewline -Encoding utf8; return 'gcm' } catch {}
+            git credential-manager --version 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { 'gcm' | Out-File $BackendFile -NoNewline -Encoding utf8; return 'gcm' }
         }
         throw 'No supported secret backend found'
     } finally {
@@ -88,14 +90,16 @@ function ConvertFrom-SecureStringSafe {
     }
 }
 
-# ── GCM helpers ──────────────────────────────────────────────────────────────
+# ── GCM helpers (deterministic: force manager helper + useHttpPath) ───────────
+$GcmGitArgs = @('-c', 'credential.helper=manager', '-c', 'credential.useHttpPath=true')
+
 function Invoke-GcmStore {
     param([string]$GcmKey)
     $secret = Read-Host "Enter secret for $GcmKey" -AsSecureString
     $plain = ConvertFrom-SecureStringSafe $secret
     try {
-        $input = "protocol=https`nhost=secrets.local`npath=$GcmKey`nusername=token`npassword=$plain`n`n"
-        $input | git credential approve
+        $input = "protocol=https`nhost=secret-ops.local`npath=$GcmKey`nusername=secret-ops`npassword=$plain`n`n"
+        $input | git @GcmGitArgs credential approve
     } finally {
         $plain = $null
     }
@@ -103,8 +107,8 @@ function Invoke-GcmStore {
 
 function Invoke-GcmGet {
     param([string]$GcmKey)
-    $input = "protocol=https`nhost=secrets.local`npath=$GcmKey`nusername=token`n`n"
-    $result = $input | git credential fill 2>$null
+    $input = "protocol=https`nhost=secret-ops.local`npath=$GcmKey`nusername=secret-ops`n`n"
+    $result = $input | git @GcmGitArgs credential fill 2>$null
     $match = $result | Select-String '^password='
     if ($match) { return ($match -replace '^password=','') }
     throw "Secret '$GcmKey' not found"
@@ -117,24 +121,22 @@ function Test-GcmExists {
 
 function Remove-GcmSecret {
     param([string]$GcmKey)
-    # Retrieve actual credential to reject properly
-    $input = "protocol=https`nhost=secrets.local`npath=$GcmKey`nusername=token`n`n"
+    $input = "protocol=https`nhost=secret-ops.local`npath=$GcmKey`nusername=secret-ops`n`n"
     try {
-        $fill = $input | git credential fill 2>$null
-        "$fill`n`n" | git credential reject
+        $fill = $input | git @GcmGitArgs credential fill 2>$null
+        "$fill`n`n" | git @GcmGitArgs credential reject
     } catch {
-        # If fill fails, credential doesn't exist — still attempt reject
-        "protocol=https`nhost=secrets.local`npath=$GcmKey`nusername=token`npassword=x`n`n" | git credential reject
+        "protocol=https`nhost=secret-ops.local`npath=$GcmKey`nusername=secret-ops`npassword=x`n`n" | git @GcmGitArgs credential reject
     }
 }
 
-# ── Vault helpers ────────────────────────────────────────────────────────────
+# ── Vault helpers (namespaced under secret/secret-ops/) ──────────────────────
 function Invoke-VaultStore {
     param([string]$VaultKey)
     $secret = Read-Host "Enter secret for $VaultKey" -AsSecureString
     $plain = ConvertFrom-SecureStringSafe $secret
     try {
-        $plain | vault kv put "secret/$VaultKey" value=- | Out-Null
+        $plain | vault kv put "secret/secret-ops/$VaultKey" value=- | Out-Null
     } finally {
         $plain = $null
     }
@@ -142,12 +144,16 @@ function Invoke-VaultStore {
 
 function Invoke-VaultGet {
     param([string]$VaultKey)
-    vault kv get -field=value "secret/$VaultKey" 2>$null
+    $result = vault kv get -field=value "secret/secret-ops/$VaultKey" 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrEmpty($result)) {
+        throw "Secret '$VaultKey' not found"
+    }
+    return $result
 }
 
 function Test-VaultExists {
     param([string]$VaultKey)
-    try { vault kv get -field=value "secret/$VaultKey" 2>$null | Out-Null; return $true } catch { return $false }
+    try { Invoke-VaultGet $VaultKey | Out-Null; return $true } catch { return $false }
 }
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -226,7 +232,7 @@ try {
             $backend = Get-Backend
             switch ($backend) {
                 'gcm'   { Write-Host '(GCM does not support list — use OS credential manager UI)' }
-                'vault' { vault kv list secret/ 2>$null }
+                'vault' { vault kv list secret/secret-ops/ 2>$null }
                 default { throw "Unsupported backend '$backend'" }
             }
             Write-Audit -Op list -Rc 0

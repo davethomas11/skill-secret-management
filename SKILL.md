@@ -15,13 +15,13 @@ user-invocable: true
 
 # secret-management
 
-Secure secret operations with an inject model. The agent orchestrates; trusted scripts execute. **Values never enter LLM context.**
+Secure secret operations with an inject model. The agent orchestrates; trusted scripts execute. **Values never enter LLM context through script code paths.** The injected subprocess is agent-chosen — it may produce output containing the value.
 
 ## Security Rules
 
 | # | Rule |
 |---|------|
-| 1 | Agent MUST NEVER see, log, echo, or handle secret values |
+| 1 | Agent MUST NEVER see, log, echo, or handle secret values. Note: the injected subprocess is agent-chosen and may produce output containing the value — use purpose-built commands. |
 | 2 | No `get` / `read` / `reveal` operation exists — only `inject` (scoped subprocess) |
 | 3 | `store` prompts the user interactively via `read -rsp` — agent issues the command, script handles input |
 | 4 | Agent MUST get explicit user confirmation before `inject` and `delete` (approval gate) |

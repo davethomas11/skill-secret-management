@@ -8,8 +8,10 @@ BACKEND_FILE="${CONFIG_DIR}/backend"
 AUDIT_LOG="${CONFIG_DIR}/audit.log"
 LOCK_FILE="${CONFIG_DIR}/.backend.lock"
 VALID_BACKENDS="vault keychain keyring gcm"
+SERVICE_PREFIX="secret-ops:"
 
 mkdir -p "$CONFIG_DIR"
+chmod 700 "$CONFIG_DIR"
 
 # ── Key validation ───────────────────────────────────────────────────────────
 _validate_key() {
@@ -118,55 +120,59 @@ _ensure_backend() {
 # ── Backend operations ───────────────────────────────────────────────────────
 
 # -- Store (secrets via stdin, never argv) --
-_store_keychain()  { security add-generic-password -a "$(whoami)" -s "$1" -U -w; }
+_store_keychain()  { security add-generic-password -a "secret-ops" -s "${SERVICE_PREFIX}$1" -U -w; }
 _store_keyring() {
-  local key="$1"
+  local key="$1" store_rc=0
   read -rsp "Enter secret for $key: " val; echo
-  printf '%s' "$val" | keyctl padd user "$key" @u >/dev/null
+  printf '%s' "$val" | keyctl padd user "${SERVICE_PREFIX}${key}" @u >/dev/null || store_rc=$?
   val=""
+  return "$store_rc"
 }
 _store_gcm() {
-  local key="$1"
+  local key="$1" store_rc=0
   read -rsp "Enter secret for $key: " val; echo
-  printf 'protocol=https\nhost=secrets.local\npath=%s\nusername=token\npassword=%s\n\n' "$key" "$val" | git credential approve
+  printf 'protocol=https\nhost=secret-ops.local\npath=%s\nusername=secret-ops\npassword=%s\n\n' "$key" "$val" \
+    | git -c credential.helper=manager -c credential.useHttpPath=true credential approve || store_rc=$?
   val=""
+  return "$store_rc"
 }
 _store_vault() {
-  local key="$1"
+  local key="$1" store_rc=0
   read -rsp "Enter secret for $key: " val; echo
-  printf '%s' "$val" | vault kv put "secret/$key" value=- >/dev/null
+  printf '%s' "$val" | vault kv put "secret/secret-ops/$key" value=- >/dev/null || store_rc=$?
   val=""
+  return "$store_rc"
 }
 
 # -- Exists --
-_exists_keychain() { security find-generic-password -s "$1" &>/dev/null; }
-_exists_keyring()  { keyctl search @u user "$1" &>/dev/null; }
-_exists_gcm()      { printf 'protocol=https\nhost=secrets.local\npath=%s\nusername=token\n\n' "$1" | git credential fill 2>/dev/null | grep -q "^password="; }
-_exists_vault()    { vault kv get -field=value "secret/$1" &>/dev/null; }
+_exists_keychain() { security find-generic-password -a "secret-ops" -s "${SERVICE_PREFIX}$1" &>/dev/null; }
+_exists_keyring()  { keyctl search @u user "${SERVICE_PREFIX}$1" &>/dev/null; }
+_exists_gcm()      { printf 'protocol=https\nhost=secret-ops.local\npath=%s\nusername=secret-ops\n\n' "$1" | git -c credential.helper=manager -c credential.useHttpPath=true credential fill 2>/dev/null | grep -q "^password="; }
+_exists_vault()    { vault kv get -field=value "secret/secret-ops/$1" &>/dev/null; }
 
 # -- Delete --
-_delete_keychain() { security delete-generic-password -a "$(whoami)" -s "$1" &>/dev/null; }
-_delete_keyring()  { local kid; kid=$(keyctl search @u user "$1" 2>/dev/null) && keyctl unlink "$kid" @u &>/dev/null; }
+_delete_keychain() { security delete-generic-password -a "secret-ops" -s "${SERVICE_PREFIX}$1" &>/dev/null; }
+_delete_keyring()  { local kid; kid=$(keyctl search @u user "${SERVICE_PREFIX}$1" 2>/dev/null) && keyctl unlink "$kid" @u &>/dev/null; }
 _delete_gcm() {
   local key="$1"
   # Retrieve actual credential to reject it properly
   local fill_output
-  fill_output=$(printf 'protocol=https\nhost=secrets.local\npath=%s\nusername=token\n\n' "$key" | git credential fill 2>/dev/null) || true
-  printf '%s\n\n' "$fill_output" | git credential reject
+  fill_output=$(printf 'protocol=https\nhost=secret-ops.local\npath=%s\nusername=secret-ops\n\n' "$key" | git -c credential.helper=manager -c credential.useHttpPath=true credential fill 2>/dev/null) || true
+  printf '%s\n\n' "$fill_output" | git -c credential.helper=manager -c credential.useHttpPath=true credential reject
 }
-_delete_vault()    { vault kv delete "secret/$1" &>/dev/null; }
+_delete_vault()    { vault kv delete "secret/secret-ops/$1" &>/dev/null; }
 
 # -- List --
-_list_keychain() { security dump-keychain 2>/dev/null | grep '"svce"' | sed 's/.*="//;s/".*//'; }
-_list_keyring()  { keyctl show @u 2>/dev/null | awk 'NR>1 {print $NF}'; }
+_list_keychain() { security dump-keychain 2>/dev/null | grep '"svce"' | sed 's/.*="//;s/".*//;' | grep "^${SERVICE_PREFIX}" | sed "s/^${SERVICE_PREFIX}//"; }
+_list_keyring()  { keyctl show @u 2>/dev/null | awk 'NR>1 {print $NF}' | grep "^${SERVICE_PREFIX}" | sed "s/^${SERVICE_PREFIX}//"; }
 _list_gcm()      { echo "(GCM does not support list — use OS credential manager UI)" >&2; return 0; }
-_list_vault()    { vault kv list -format=json secret/ 2>/dev/null | python3 -c "import sys,json;[print(k) for k in json.load(sys.stdin)]" 2>/dev/null || vault kv list secret/ 2>/dev/null; }
+_list_vault()    { vault kv list -format=json secret/secret-ops/ 2>/dev/null | python3 -c "import sys,json;[print(k) for k in json.load(sys.stdin)]" 2>/dev/null || vault kv list secret/secret-ops/ 2>/dev/null; }
 
 # -- Inject (retrieve + scoped subprocess — subshell+exec, no argv leak) --
-_get_keychain() { security find-generic-password -s "$1" -w 2>/dev/null; }
-_get_keyring()  { local kid; kid=$(keyctl search @u user "$1" 2>/dev/null) && keyctl pipe "$kid" 2>/dev/null; }
-_get_gcm()      { printf 'protocol=https\nhost=secrets.local\npath=%s\nusername=token\n\n' "$1" | git credential fill 2>/dev/null | grep "^password=" | cut -d= -f2-; }
-_get_vault()    { vault kv get -field=value "secret/$1" 2>/dev/null; }
+_get_keychain() { security find-generic-password -a "secret-ops" -s "${SERVICE_PREFIX}$1" -w 2>/dev/null; }
+_get_keyring()  { local kid; kid=$(keyctl search @u user "${SERVICE_PREFIX}$1" 2>/dev/null) && keyctl pipe "$kid" 2>/dev/null; }
+_get_gcm()      { printf 'protocol=https\nhost=secret-ops.local\npath=%s\nusername=secret-ops\n\n' "$1" | git -c credential.helper=manager -c credential.useHttpPath=true credential fill 2>/dev/null | grep "^password=" | cut -d= -f2-; }
+_get_vault()    { vault kv get -field=value "secret/secret-ops/$1" 2>/dev/null; }
 
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 _dispatch() {
