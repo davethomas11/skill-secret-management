@@ -169,6 +169,11 @@ try {
             if (-not $Key) { throw 'Usage: secret-ops.ps1 inject KEY --confirm -- cmd args…' }
             Assert-ValidKey $Key
 
+            # Inject requires env-var-safe key name (no dots or hyphens)
+            if ($Key -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') {
+                throw "Key '$Key' is not a valid environment variable name (use [A-Za-z_][A-Za-z0-9_]*)"
+            }
+
             # Parse --confirm and -- separator
             $confirmed = $false
             $sepIdx = -1
@@ -178,8 +183,8 @@ try {
             }
             if (-not $confirmed) { throw "inject requires --confirm flag (approval gate)" }
             if ($sepIdx -lt 0) { throw "Missing '--' separator" }
+            if ($sepIdx -ge $CommandArgs.Length - 1) { throw "No command specified after '--'" }
             $cmd = $CommandArgs[($sepIdx+1)..($CommandArgs.Length-1)]
-            if ($cmd.Length -eq 0) { throw "No command specified after '--'" }
 
             $backend = Get-Backend
             $val = switch ($backend) {
