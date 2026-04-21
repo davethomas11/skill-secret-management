@@ -1,58 +1,74 @@
 # skill-secrets-setup
 
-Interactive Copilot skill for setting up secure secret storage on your workstation.
+Copilot skill for secure secret management using an **inject model** — the agent orchestrates operations but **never sees secret values**.
 
-Detects your OS, available tooling (macOS Keychain, Linux keyring, HashiCorp Vault, Git Credential Manager), scans for plaintext secrets, and configures a resilient `_secret_get` wrapper with JIT fetching.
+## Architecture
 
-## Installation
+```
+Agent (LLM context)          │  Script (subprocess)
+─────────────────────────────┼───────────────────────────────
+"store GITLAB_TOKEN"    ──►  │  read -rsp → backend write
+"inject KEY -- cmd"     ──►  │  backend read → env KEY=val cmd
+"list"                  ──►  │  key names only → stdout
+"exists KEY"            ──►  │  exit code 0/1
+"delete KEY"            ──►  │  backend delete
+                             │
+  Agent sees: exit codes,    │  Script sees: secret values
+  key names, cmd output      │  (scoped, never printed)
+```
 
-Copy `SKILL.md` into your Copilot skills directory:
+## Install
 
 ```bash
-# GitHub Copilot CLI
-cp SKILL.md ~/.copilot/skills/secrets-setup/SKILL.md
-
-# Or clone the whole repo
 git clone https://github.com/tyler555g/skill-secrets-setup.git ~/.copilot/skills/secrets-setup
 ```
 
-## Usage
+## Operations
 
-Invoke the skill from any Copilot session:
+| Op | Command | What Happens | Agent Sees |
+|----|---------|-------------|------------|
+| **store** | `secret-ops.sh store KEY` | Interactive `read -rsp` → backend | Exit code |
+| **inject** | `secret-ops.sh inject KEY --confirm -- cmd args` | Retrieves secret, injects via subshell+exec | Command output |
+| **list** | `secret-ops.sh list` | Queries backend for key names | Key names |
+| **delete** | `secret-ops.sh delete KEY --confirm` | Removes from backend | Exit code |
+| **exists** | `secret-ops.sh exists KEY` | Checks backend | Exit 0=yes, 1=no |
 
-```
-Use the skill tool to invoke the "secrets-setup" skill
-```
+## Backends
 
-The skill walks you through an interactive 6-step process:
+| Backend | Tool | OS | Auto-detect Priority |
+|---------|------|----|---------------------|
+| HashiCorp Vault | `vault` | Any | 1st (if `VAULT_ADDR` set + authenticated) |
+| macOS Keychain | `security` | macOS | 2nd |
+| Linux keyring | `keyctl` | Linux | 3rd |
+| Git Credential Manager | `git credential-manager` | Any | 4th (cross-platform fallback) |
 
-1. **Detect Environment** — OS, available tools, existing Vault config, plaintext secrets scan
-2. **Ask User Context** — Vault access, secret types, persistent env var needs
-3. **Recommend Method** — Vault + OS fallback, OS-native only, or Git Credential Manager
-4. **Configure** — Install deps, create shell helpers, migrate plaintext secrets
-5. **Verify** — Round-trip test, shell function test, Vault connectivity
-6. **Educate** — JIT vs export tradeoffs, rotation reminders
+Backend is **pinned on first use** to `~/.config/secret-ops/backend`. No silent downgrade.
 
-## Supported Platforms
+## Security Model
 
-| Platform | Backend |
-|----------|---------|
-| macOS | Keychain (`security` CLI) |
-| Linux | Kernel keyring (`keyctl`) |
-| Windows | Credential Manager |
-| Any | HashiCorp Vault |
-| Any | Git Credential Manager |
+- **No reveal** — there is no `get`/`read` command. Only `inject` (scoped subprocess via subshell+exec).
+- **Approval gates** — `inject` and `delete` require `--confirm` flag. Agent must ask user before passing it.
+- **Fail-closed** — if the pinned backend fails, the operation fails. No fallback chain.
+- **No argv leaks** — secrets injected via shell `export` in a subshell, not `env` command argv.
+- **Locked backend pinning** — first-use detection uses `flock`/mutex to prevent race conditions.
+- **Key validation** — key names restricted to `[A-Za-z0-9_.-]+` (max 256 chars).
+- **Audit log** — every operation logged to `~/.config/secret-ops/audit.log` (ops only, never values).
+- **AI-Human Principle 3** — agent never asks for, sees, or handles secret values.
 
-## License
+## Token Efficiency
 
-MIT
+SKILL.md is protocol-only (~625 tokens). All logic lives in scripts that are executed but never loaded into context. ~90% reduction vs v0.1.0.
 
 ## Authoritative Sources
 
 - [Apple Keychain Services](https://developer.apple.com/documentation/security/keychain_services)
-- [Linux `keyctl` man page](https://man7.org/linux/man-pages/man1/keyctl.1.html)
+- [Linux keyctl man page](https://man7.org/linux/man-pages/man1/keyctl.1.html)
 - [Linux kernel key management](https://www.kernel.org/doc/html/latest/security/keys/core.html)
-- [HashiCorp Vault docs](https://developer.hashicorp.com/vault/docs)
-- [HashiCorp Vault Agent](https://developer.hashicorp.com/vault/docs/agent-and-proxy/agent)
-- [Git Credential Manager](https://github.com/git-ecosystem/git-credential-manager/blob/main/README.md)
-- [Windows Credential Manager](https://learn.microsoft.com/en-us/windows-server/security/windows-authentication/credentials-processes-in-windows-authentication)
+- [Git Credential Manager](https://github.com/git-ecosystem/git-credential-manager)
+- [HashiCorp Vault](https://developer.hashicorp.com/vault/docs)
+- [AI-Human Interaction Defaults](https://github.com/tyler555g/best-practices/blob/main/packages/content/technology_and_information/data_science_and_ai/ai-human-interaction-defaults.md)
+- [12-Factor Agents](https://github.com/humanlayer/12-factor-agents)
+
+## License
+
+MIT

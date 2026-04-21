@@ -1,0 +1,294 @@
+#!/usr/bin/env bash
+# secret-ops.sh — secure secret operations (inject model)
+# Values never printed to stdout. Agent calls this; never reads source.
+set -euo pipefail
+
+CONFIG_DIR="${HOME}/.config/secret-ops"
+BACKEND_FILE="${CONFIG_DIR}/backend"
+AUDIT_LOG="${CONFIG_DIR}/audit.log"
+LOCK_FILE="${CONFIG_DIR}/.backend.lock"
+VALID_BACKENDS="vault keychain keyring gcm"
+
+mkdir -p "$CONFIG_DIR"
+
+# ── Key validation ───────────────────────────────────────────────────────────
+_validate_key() {
+  local key="$1"
+  if [[ ! "$key" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+    echo "ERROR: Key name must match [A-Za-z0-9_.-]+" >&2
+    return 1
+  fi
+  if [ "${#key}" -gt 256 ]; then
+    echo "ERROR: Key name exceeds 256 characters" >&2
+    return 1
+  fi
+}
+
+# ── Audit ────────────────────────────────────────────────────────────────────
+_audit() {
+  local op="$1" key="${2:-}" rc="${3:-0}"
+  local backend
+  backend=$(_read_backend 2>/dev/null || echo "none")
+  # Sanitize key for log safety (replace control chars)
+  local safe_key
+  safe_key=$(printf '%s' "$key" | tr -d '\n\r\t')
+  printf '%s op=%s key=%s backend=%s rc=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$op" "$safe_key" "$backend" "$rc" \
+    >> "$AUDIT_LOG"
+}
+
+# ── Backend detection & pinning ──────────────────────────────────────────────
+_read_backend() {
+  if [ -f "$BACKEND_FILE" ]; then
+    local b
+    b=$(cat "$BACKEND_FILE")
+    # Validate pinned backend is in allowlist
+    if echo "$VALID_BACKENDS" | grep -qw "$b"; then
+      echo "$b"
+      return 0
+    fi
+    echo "ERROR: Invalid pinned backend '$b' — delete $BACKEND_FILE to re-detect" >&2
+    return 1
+  fi
+  return 1
+}
+
+_detect_backend() {
+  if [ -n "${VAULT_ADDR:-}" ] && command -v vault &>/dev/null && vault token lookup &>/dev/null 2>&1; then
+    echo "vault"
+  elif [ "$(uname -s)" = "Darwin" ] && command -v security &>/dev/null; then
+    echo "keychain"
+  elif [ "$(uname -s)" = "Linux" ] && command -v keyctl &>/dev/null; then
+    echo "keyring"
+  elif git credential-manager --version &>/dev/null 2>&1; then
+    echo "gcm"
+  else
+    return 1
+  fi
+}
+
+_ensure_backend() {
+  local backend
+  if backend=$(_read_backend); then
+    echo "$backend"
+    return 0
+  fi
+
+  # Locked detection + pinning (flock if available, otherwise best-effort)
+  if command -v flock &>/dev/null; then
+    (
+      flock -x 200
+      # Re-check after acquiring lock (another process may have pinned)
+      if [ -f "$BACKEND_FILE" ]; then
+        cat "$BACKEND_FILE"
+        return 0
+      fi
+      backend=$(_detect_backend) || { echo "ERROR: No supported secret backend found" >&2; return 1; }
+      printf '%s' "$backend" > "$BACKEND_FILE"
+      echo "Backend pinned: $backend" >&2
+      echo "$backend"
+    ) 200>"$LOCK_FILE"
+  else
+    # macOS lacks flock — use mkdir-based lock
+    local lock_dir="${CONFIG_DIR}/.backend.lockdir"
+    local attempts=0
+    while ! mkdir "$lock_dir" 2>/dev/null; do
+      attempts=$((attempts + 1))
+      if [ "$attempts" -gt 20 ]; then
+        echo "ERROR: Could not acquire backend lock" >&2
+        return 1
+      fi
+      sleep 0.1
+    done
+    trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
+    # Re-check after acquiring lock
+    if [ -f "$BACKEND_FILE" ]; then
+      cat "$BACKEND_FILE"
+      rmdir "$lock_dir" 2>/dev/null || true
+      return 0
+    fi
+    backend=$(_detect_backend) || { rmdir "$lock_dir" 2>/dev/null || true; echo "ERROR: No supported secret backend found" >&2; return 1; }
+    printf '%s' "$backend" > "$BACKEND_FILE"
+    rmdir "$lock_dir" 2>/dev/null || true
+    echo "Backend pinned: $backend" >&2
+    echo "$backend"
+  fi
+}
+
+# ── Backend operations ───────────────────────────────────────────────────────
+
+# -- Store (secrets via stdin, never argv) --
+_store_keychain()  { security add-generic-password -a "$(whoami)" -s "$1" -w -U; }
+_store_keyring() {
+  local key="$1"
+  read -rsp "Enter secret for $key: " val; echo
+  printf '%s' "$val" | keyctl padd user "$key" @u >/dev/null
+  val=""
+}
+_store_gcm() {
+  local key="$1"
+  read -rsp "Enter secret for $key: " val; echo
+  printf 'protocol=https\nhost=secrets.local\npath=%s\nusername=token\npassword=%s\n\n' "$key" "$val" | git credential approve
+  val=""
+}
+_store_vault() {
+  local key="$1"
+  read -rsp "Enter secret for $key: " val; echo
+  printf '%s' "$val" | vault kv put "secret/$key" value=- >/dev/null
+  val=""
+}
+
+# -- Exists --
+_exists_keychain() { security find-generic-password -s "$1" &>/dev/null; }
+_exists_keyring()  { keyctl search @u user "$1" &>/dev/null; }
+_exists_gcm()      { printf 'protocol=https\nhost=secrets.local\npath=%s\nusername=token\n\n' "$1" | git credential fill 2>/dev/null | grep -q "^password="; }
+_exists_vault()    { vault kv get -field=value "secret/$1" &>/dev/null; }
+
+# -- Delete --
+_delete_keychain() { security delete-generic-password -a "$(whoami)" -s "$1" &>/dev/null; }
+_delete_keyring()  { local kid; kid=$(keyctl search @u user "$1" 2>/dev/null) && keyctl unlink "$kid" @u &>/dev/null; }
+_delete_gcm() {
+  local key="$1"
+  # Retrieve actual credential to reject it properly
+  local fill_output
+  fill_output=$(printf 'protocol=https\nhost=secrets.local\npath=%s\nusername=token\n\n' "$key" | git credential fill 2>/dev/null) || true
+  printf '%s\n\n' "$fill_output" | git credential reject
+}
+_delete_vault()    { vault kv delete "secret/$1" &>/dev/null; }
+
+# -- List --
+_list_keychain() { security dump-keychain 2>/dev/null | grep '"svce"' | sed 's/.*="//;s/".*//'; }
+_list_keyring()  { keyctl show @u 2>/dev/null | awk 'NR>1 {print $NF}'; }
+_list_gcm()      { echo "(GCM does not support list — use OS credential manager UI)" >&2; return 0; }
+_list_vault()    { vault kv list -format=json secret/ 2>/dev/null | python3 -c "import sys,json;[print(k) for k in json.load(sys.stdin)]" 2>/dev/null || vault kv list secret/ 2>/dev/null; }
+
+# -- Inject (retrieve + scoped subprocess — subshell+exec, no argv leak) --
+_get_keychain() { security find-generic-password -s "$1" -w 2>/dev/null; }
+_get_keyring()  { local kid; kid=$(keyctl search @u user "$1" 2>/dev/null) && keyctl pipe "$kid" 2>/dev/null; }
+_get_gcm()      { printf 'protocol=https\nhost=secrets.local\npath=%s\nusername=token\n\n' "$1" | git credential fill 2>/dev/null | grep "^password=" | cut -d= -f2-; }
+_get_vault()    { vault kv get -field=value "secret/$1" 2>/dev/null; }
+
+# ── Dispatch ─────────────────────────────────────────────────────────────────
+_dispatch() {
+  local op="$1" backend="$2" key="${3:-}"
+  local fn="_${op}_${backend}"
+  if ! type "$fn" &>/dev/null; then
+    echo "ERROR: Operation '$op' not supported on backend '$backend'" >&2
+    return 1
+  fi
+  "$fn" "$key"
+}
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+main() {
+  local op="${1:-help}"
+  shift || true
+
+  case "$op" in
+    store)
+      [ $# -lt 1 ] && { echo "Usage: secret-ops.sh store KEY" >&2; exit 1; }
+      local key="$1" backend rc=0
+      _validate_key "$key" || exit 1
+      backend=$(_ensure_backend) || exit 1
+      _dispatch store "$backend" "$key" || rc=$?
+      _audit store "$key" "$rc"
+      exit "$rc"
+      ;;
+
+    inject)
+      [ $# -lt 1 ] && { echo "Usage: secret-ops.sh inject KEY [--confirm] -- cmd args…" >&2; exit 1; }
+      local key="$1"; shift
+      _validate_key "$key" || exit 1
+
+      # Require --confirm flag (approval gate)
+      local confirmed=false
+      while [ $# -gt 0 ] && [ "$1" != "--" ]; do
+        case "$1" in
+          --confirm) confirmed=true ;;
+          *) echo "ERROR: Unknown flag '$1'" >&2; exit 1 ;;
+        esac
+        shift
+      done
+      if [ "$confirmed" != "true" ]; then
+        echo "ERROR: inject requires --confirm flag (approval gate)" >&2
+        exit 1
+      fi
+      [ "${1:-}" = "--" ] && shift || { echo "ERROR: Missing '--' separator" >&2; exit 1; }
+      [ $# -lt 1 ] && { echo "ERROR: No command specified after '--'" >&2; exit 1; }
+
+      local backend rc=0
+      backend=$(_ensure_backend) || exit 1
+      local val
+      val=$(_dispatch get "$backend" "$key") || { echo "ERROR: Secret '$key' not found" >&2; _audit inject "$key" 1; exit 1; }
+      _audit inject "$key" 0
+      # Inject via subshell+exec: secret is in shell memory only, never in argv
+      (export "${key}=${val}"; val=""; exec "$@")
+      rc=$?
+      exit "$rc"
+      ;;
+
+    list)
+      local backend rc=0
+      backend=$(_ensure_backend) || exit 1
+      _dispatch list "$backend" "" || rc=$?
+      _audit list "" "$rc"
+      exit "$rc"
+      ;;
+
+    delete)
+      [ $# -lt 1 ] && { echo "Usage: secret-ops.sh delete KEY [--confirm]" >&2; exit 1; }
+      local key="$1"; shift
+      _validate_key "$key" || exit 1
+
+      # Require --confirm flag (approval gate)
+      local confirmed=false
+      for arg in "$@"; do
+        [ "$arg" = "--confirm" ] && confirmed=true
+      done
+      if [ "$confirmed" != "true" ]; then
+        echo "ERROR: delete requires --confirm flag (approval gate)" >&2
+        exit 1
+      fi
+
+      local backend rc=0
+      backend=$(_ensure_backend) || exit 1
+      _dispatch delete "$backend" "$key" || rc=$?
+      _audit delete "$key" "$rc"
+      exit "$rc"
+      ;;
+
+    exists)
+      [ $# -lt 1 ] && { echo "Usage: secret-ops.sh exists KEY" >&2; exit 1; }
+      local key="$1" backend rc=0
+      _validate_key "$key" || exit 1
+      backend=$(_ensure_backend) || exit 1
+      _dispatch exists "$backend" "$key" || rc=1
+      _audit exists "$key" "$rc"
+      exit "$rc"
+      ;;
+
+    help|--help|-h)
+      cat >&2 <<'HELP'
+secret-ops.sh — secure secret operations (inject model)
+
+Operations:
+  store  KEY                        Store a secret (interactive prompt)
+  inject KEY --confirm -- cmd …     Inject secret into subprocess env
+  list                              List stored key names
+  delete KEY --confirm              Remove a secret
+  exists KEY                        Check if a secret exists (exit 0/1)
+
+Backends: vault, keychain, keyring, gcm
+Config:   ~/.config/secret-ops/
+HELP
+      exit 0
+      ;;
+
+    *)
+      echo "ERROR: Unknown operation '$op'. Run with --help." >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

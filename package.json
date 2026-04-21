@@ -1,7 +1,7 @@
 {
   "name": "@tyler.given/skill-secrets-setup",
-  "version": "0.1.0",
-  "description": "Interactive Copilot skill for setting up secure secret storage on your workstation",
+  "version": "0.2.0",
+  "description": "Copilot skill for secure secret management \u2014 inject model where agent never sees values",
   "keywords": [
     "copilot",
     "github-copilot",
@@ -10,9 +10,10 @@
     "keychain",
     "keyring",
     "vault",
+    "gcm",
     "git-credential-manager",
     "security",
-    "onboarding"
+    "inject-model"
   ],
   "homepage": "https://github.com/tyler555g/skill-secrets-setup",
   "repository": {
@@ -22,7 +23,8 @@
   "license": "MIT",
   "author": "tyler555g",
   "files": [
-    "SKILL.md"
+    "SKILL.md",
+    "scripts/"
   ],
   "publishConfig": {
     "access": "public"
