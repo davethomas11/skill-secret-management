@@ -57,15 +57,16 @@ _read_backend() {
 
 _probe_vault() {
   # Verify vault can write+delete in our namespace (not just that token is valid)
-  vault kv put "secret/secret-ops/_probe" value=probe_test &>/dev/null 2>&1 || return 1
-  vault kv delete "secret/secret-ops/_probe" &>/dev/null 2>&1 || true
+  local probe_key="_probe_${RANDOM}_$$"
+  vault kv put "secret/secret-ops/${probe_key}" value=probe_test &>/dev/null 2>&1 || return 1
+  vault kv delete "secret/secret-ops/${probe_key}" &>/dev/null 2>&1 || return 1
 }
 
 _probe_keyring() {
   # Verify keyctl can store+retrieve in user keyring (not just that binary exists)
-  local kid
-  kid=$(printf 'probe_test' | keyctl padd user "${SERVICE_PREFIX}_probe" @u 2>/dev/null) || return 1
-  keyctl unlink "$kid" @u &>/dev/null 2>&1 || true
+  local probe_key="_probe_${RANDOM}_$$" kid
+  kid=$(printf 'probe_test' | keyctl padd user "${SERVICE_PREFIX}${probe_key}" @u 2>/dev/null) || return 1
+  keyctl unlink "$kid" @u &>/dev/null 2>&1 || return 1
 }
 
 _detect_backend() {

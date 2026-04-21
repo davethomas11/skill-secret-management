@@ -65,11 +65,14 @@ function Get-Backend {
         if ($env:VAULT_ADDR -and (Get-Command vault -ErrorAction SilentlyContinue)) {
             vault token lookup 2>$null | Out-Null
             if ($LASTEXITCODE -eq 0) {
-                # Probe: verify we can write+delete in our namespace
-                vault kv put 'secret/secret-ops/_probe' value=probe_test 2>$null | Out-Null
+                # Probe: verify we can write+delete in our namespace (random key to avoid collisions)
+                $probeKey = "_probe_$(Get-Random)_$PID"
+                vault kv put "secret/secret-ops/$probeKey" value=probe_test 2>$null | Out-Null
                 if ($LASTEXITCODE -eq 0) {
-                    vault kv delete 'secret/secret-ops/_probe' 2>$null | Out-Null
-                    'vault' | Out-File $BackendFile -NoNewline -Encoding utf8; return 'vault'
+                    vault kv delete "secret/secret-ops/$probeKey" 2>$null | Out-Null
+                    if ($LASTEXITCODE -eq 0) {
+                        'vault' | Out-File $BackendFile -NoNewline -Encoding utf8; return 'vault'
+                    }
                 }
             }
         }

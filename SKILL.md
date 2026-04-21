@@ -51,7 +51,7 @@ Secure secret operations with an inject model. The agent orchestrates; trusted s
 
 ## Protocol
 
-1. **First invocation** — run `secret-ops.sh exists _probe` to trigger backend detection and pinning.
+1. **First invocation** — run `secret-ops.sh exists MY_KEY` (any key name) to trigger backend detection and pinning.
 2. **Before `inject`** — ask the user: confirm key name and the command that will receive it. Pass `--confirm` flag.
 3. **Before `delete`** — ask the user: confirm key name and that deletion is intentional. Pass `--confirm` flag.
 4. **On failure** (non-zero exit) — report the error to the user. MUST NOT retry with a different backend.
