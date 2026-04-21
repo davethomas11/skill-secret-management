@@ -62,20 +62,20 @@ function Get-Backend {
 
         # Detect: Vault → GCM (use $LASTEXITCODE for native commands)
         if ($env:VAULT_ADDR -and (Get-Command vault -ErrorAction SilentlyContinue)) {
+            # VAULT_ADDR set + vault exists = user intends Vault — fail closed on any issue
             vault token lookup 2>$null | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-                # Probe: verify we can write+delete in our namespace (random key to avoid collisions)
-                $probeKey = "_probe_$(Get-Random)_$PID"
-                vault kv put "secret/secret-ops/$probeKey" value=probe_test 2>$null | Out-Null
-                if ($LASTEXITCODE -eq 0) {
-                    vault kv delete "secret/secret-ops/$probeKey" 2>$null | Out-Null
-                    if ($LASTEXITCODE -eq 0) {
-                        'vault' | Out-File $BackendFile -NoNewline -Encoding utf8; return 'vault'
-                    }
-                }
-                # Vault is configured but unusable — fail closed, don't silently downgrade
-                throw "Vault is configured (VAULT_ADDR set, token valid) but probe to secret/secret-ops/ failed. Fix Vault permissions, or remove `$env:VAULT_ADDR to use a local backend."
+            if ($LASTEXITCODE -ne 0) {
+                throw "Vault is configured (VAULT_ADDR set) but authentication failed. Fix Vault auth, or remove `$env:VAULT_ADDR to use a local backend."
             }
+            $probeKey = "_probe_$(Get-Random)_$PID"
+            vault kv put "secret/secret-ops/$probeKey" value=probe_test 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                vault kv delete "secret/secret-ops/$probeKey" 2>$null | Out-Null
+                if ($LASTEXITCODE -eq 0) {
+                    'vault' | Out-File $BackendFile -NoNewline -Encoding utf8; return 'vault'
+                }
+            }
+            throw "Vault is configured (VAULT_ADDR set, token valid) but probe to secret/secret-ops/ failed. Fix Vault permissions, or remove `$env:VAULT_ADDR to use a local backend."
         }
         if (Get-Command git -ErrorAction SilentlyContinue) {
             git credential-manager --version 2>$null | Out-Null

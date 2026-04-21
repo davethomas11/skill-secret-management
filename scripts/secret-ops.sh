@@ -70,16 +70,19 @@ _probe_keyring() {
 }
 
 _detect_backend() {
-  local vault_configured=false
-  if [ -n "${VAULT_ADDR:-}" ] && command -v vault &>/dev/null && vault token lookup &>/dev/null 2>&1; then
-    vault_configured=true
+  # If VAULT_ADDR is set and vault binary exists, the user intends Vault — fail closed on any issue
+  if [ -n "${VAULT_ADDR:-}" ] && command -v vault &>/dev/null; then
+    if ! vault token lookup &>/dev/null 2>&1; then
+      echo "ERROR: Vault is configured (VAULT_ADDR set) but authentication failed." >&2
+      echo "Fix Vault auth, or unset VAULT_ADDR to use a local backend." >&2
+      return 1
+    fi
     if _probe_vault; then
       echo "vault"
       return 0
     fi
-    # Vault is configured but unusable — fail closed, don't silently downgrade
     echo "ERROR: Vault is configured (VAULT_ADDR set, token valid) but probe to secret/secret-ops/ failed." >&2
-    echo "Fix Vault permissions, or delete $BACKEND_FILE and unset VAULT_ADDR to use a local backend." >&2
+    echo "Fix Vault permissions, or unset VAULT_ADDR to use a local backend." >&2
     return 1
   fi
   if [ "$(uname -s)" = "Darwin" ] && command -v security &>/dev/null; then
